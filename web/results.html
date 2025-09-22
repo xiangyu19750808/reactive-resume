@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>结果中心</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: "Segoe UI", "PingFang SC", "Helvetica Neue", Arial, sans-serif;
+    }
+    body {
+      margin: 0;
+      background: #f5f7fb;
+      color: #1f2937;
+    }
+    .container {
+      max-width: 960px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    h1 {
+      margin: 0 0 12px;
+      font-size: 2rem;
+      font-weight: 700;
+      color: #0f172a;
+    }
+    .lead {
+      margin: 0 0 24px;
+      color: #475569;
+    }
+    form {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      align-items: center;
+      background: #fff;
+      padding: 16px 20px;
+      border-radius: 12px;
+      box-shadow: 0 16px 32px -24px rgba(15, 23, 42, 0.3);
+      margin-bottom: 20px;
+    }
+    label {
+      font-weight: 600;
+      color: #0f172a;
+    }
+    input[type="text"] {
+      flex: 1 1 260px;
+      min-width: 200px;
+      padding: 10px 14px;
+      border: 1px solid #cbd5f5;
+      border-radius: 8px;
+      font-size: 1rem;
+      background: #f8fafc;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    input[type="text"]:focus {
+      outline: none;
+      border-color: #2563eb;
+      box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.2);
+      background: #fff;
+    }
+    button {
+      padding: 10px 18px;
+      border: none;
+      border-radius: 8px;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s, transform 0.2s;
+    }
+    button[type="submit"] {
+      background: #2563eb;
+      color: #fff;
+    }
+    button[type="submit"]:hover:not(:disabled) {
+      background: #1d4ed8;
+      transform: translateY(-1px);
+    }
+    button:disabled {
+      cursor: not-allowed;
+      opacity: 0.6;
+    }
+    .status {
+      margin: 12px 0;
+      padding: 12px 16px;
+      border-radius: 10px;
+      border: 1px solid transparent;
+      background: #e0f2fe;
+      color: #0369a1;
+    }
+    .status.hidden { display: none; }
+    .status.success {
+      background: #dcfce7;
+      border-color: #bbf7d0;
+      color: #15803d;
+    }
+    .status.error {
+      background: #fee2e2;
+      border-color: #fecaca;
+      color: #b91c1c;
+    }
+    .card-list {
+      display: grid;
+      gap: 16px;
+      grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+    }
+    .card {
+      background: #fff;
+      border-radius: 14px;
+      padding: 18px;
+      box-shadow: 0 18px 40px -28px rgba(15, 23, 42, 0.4);
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .card h2 {
+      font-size: 1.05rem;
+      margin: 0;
+      color: #0f172a;
+      word-break: break-all;
+    }
+    .timestamp {
+      font-size: 0.9rem;
+      color: #64748b;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .actions button {
+      flex: 1 1 90px;
+      min-width: 90px;
+    }
+    .btn-preview { background: #f1f5f9; color: #0f172a; }
+    .btn-download { background: linear-gradient(135deg, #0ea5e9, #2563eb); color: #fff; }
+    .btn-reopt { background: #fef3c7; color: #b45309; }
+    .empty {
+      text-align: center;
+      padding: 40px 20px;
+      color: #6b7280;
+      background: #fff;
+      border-radius: 12px;
+    }
+    @media (max-width: 640px) {
+      form { flex-direction: column; align-items: stretch; }
+      button[type="submit"] { width: 100%; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>结果中心</h1>
+    <p class="lead">查看最近生成的简历 PDF，支持在线预览、下载和再次优化。</p>
+
+    <form id="queryForm">
+      <label for="openidInput">OpenID</label>
+      <input id="openidInput" name="openid" type="text" placeholder="例如：wx_openid_xxx" required />
+      <button type="submit">查询</button>
+    </form>
+
+    <div id="statusBox" class="status hidden"></div>
+    <div id="cardsWrapper" class="card-list"></div>
+    <div id="emptyHint" class="empty hidden">暂无数据，请确认 OpenID 是否正确。</div>
+  </div>
+
+  <script>
+  (function () {
+    const form = document.getElementById('queryForm');
+    const openidInput = document.getElementById('openidInput');
+    const statusBox = document.getElementById('statusBox');
+    const cardsWrapper = document.getElementById('cardsWrapper');
+    const emptyHint = document.getElementById('emptyHint');
+    const submitButton = form.querySelector('button[type="submit"]');
+    const formatter = typeof Intl !== 'undefined' && Intl.DateTimeFormat ?
+      new Intl.DateTimeFormat('zh-CN', { dateStyle: 'medium', timeStyle: 'short' }) : null;
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const openid = (openidInput.value || '').trim();
+      if (!openid) {
+        setStatus('请输入 OpenID。', 'error');
+        return;
+      }
+      fetchResults(openid);
+    });
+
+    function setStatus(text, type = 'info') {
+      if (!text) {
+        statusBox.className = 'status hidden';
+        statusBox.textContent = '';
+        return;
+      }
+      statusBox.textContent = text;
+      statusBox.className = `status ${type}`;
+    }
+
+    function setLoading(isLoading) {
+      submitButton.disabled = isLoading;
+    }
+
+    function renderResults(items) {
+      cardsWrapper.innerHTML = '';
+      if (!Array.isArray(items) || items.length === 0) {
+        cardsWrapper.classList.add('hidden');
+        emptyHint.classList.remove('hidden');
+        return;
+      }
+      cardsWrapper.classList.remove('hidden');
+      emptyHint.classList.add('hidden');
+
+      items.forEach((item) => {
+        if (!item || typeof item !== 'object') return;
+
+        const card = document.createElement('div');
+        card.className = 'card';
+
+        const title = document.createElement('h2');
+        title.textContent = item.filename || '未知文件';
+        card.appendChild(title);
+
+        const timestamp = document.createElement('div');
+        timestamp.className = 'timestamp';
+        timestamp.textContent = formatDate(item.created_at);
+        card.appendChild(timestamp);
+
+        const actions = document.createElement('div');
+        actions.className = 'actions';
+
+        const previewBtn = document.createElement('button');
+        previewBtn.type = 'button';
+        previewBtn.className = 'btn-preview';
+        previewBtn.textContent = '预览';
+        previewBtn.addEventListener('click', () => handlePreview(item));
+        actions.appendChild(previewBtn);
+
+        const downloadBtn = document.createElement('button');
+        downloadBtn.type = 'button';
+        downloadBtn.className = 'btn-download';
+        downloadBtn.textContent = '下载';
+        downloadBtn.addEventListener('click', () => handleDownload(item, downloadBtn));
+        actions.appendChild(downloadBtn);
+
+        const reoptBtn = document.createElement('button');
+        reoptBtn.type = 'button';
+        reoptBtn.className = 'btn-reopt';
+        reoptBtn.textContent = '再次优化';
+        reoptBtn.addEventListener('click', () => handleReopt(item, reoptBtn));
+        actions.appendChild(reoptBtn);
+
+        card.appendChild(actions);
+        cardsWrapper.appendChild(card);
+      });
+    }
+
+    function formatDate(value) {
+      if (!value) return '-';
+      const date = new Date(value);
+      if (Number.isNaN(date.getTime())) return value;
+      return formatter ? formatter.format(date) : date.toLocaleString();
+    }
+
+    async function fetchResults(openid) {
+      setLoading(true);
+      setStatus('正在加载结果...', 'info');
+      try {
+        const response = await fetch(`/results?openid=${encodeURIComponent(openid)}`);
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          const detail = payload && (payload.detail || payload.error || payload.message);
+          throw new Error(detail || `请求失败（${response.status}）`);
+        }
+        const payload = await response.json();
+        const list = Array.isArray(payload.results) ? payload.results : [];
+        renderResults(list);
+        if (list.length === 0) {
+          setStatus('未找到相关结果。', 'info');
+        } else {
+          setStatus(`共找到 ${list.length} 条结果。`, 'success');
+        }
+      } catch (err) {
+        console.error(err);
+        renderResults([]);
+        setStatus(err && err.message ? err.message : '加载失败，请稍后重试。', 'error');
+      } finally {
+        setLoading(false);
+      }
+    }
+
+    function handlePreview(item) {
+      const url = item && item.view_url;
+      if (!url) {
+        setStatus('预览链接不存在。', 'error');
+        return;
+      }
+      window.open(url, '_blank', 'noopener');
+    }
+
+    async function handleDownload(item, button) {
+      if (!item || !item.download_url) {
+        setStatus('下载链接不存在。', 'error');
+        return;
+      }
+      button.disabled = true;
+      setStatus('正在生成下载链接...', 'info');
+      try {
+        const response = await fetch(item.download_url);
+        const contentType = response.headers.get('content-type') || '';
+        if (contentType.includes('application/json')) {
+          const payload = await response.json();
+          if (!response.ok) {
+            const detail = payload.detail || payload.error || payload.message;
+            throw new Error(detail || '下载失败');
+          }
+          const url = payload.url || item.download_url;
+          window.open(url, '_blank', 'noopener');
+        } else {
+          const blob = await response.blob();
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = item.filename || 'resume.pdf';
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          URL.revokeObjectURL(url);
+        }
+        setStatus('下载链接已打开。', 'success');
+      } catch (err) {
+        console.error(err);
+        setStatus(err && err.message ? err.message : '下载失败，请稍后重试。', 'error');
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    async function handleReopt(item, button) {
+      if (!item || !item.id) {
+        setStatus('结果ID不存在。', 'error');
+        return;
+      }
+      button.disabled = true;
+      setStatus('正在提交再次优化请求...', 'info');
+      try {
+        const response = await fetch(`/results/${encodeURIComponent(item.id)}/reopt`, { method: 'POST' });
+        const payload = await response.json().catch(() => null);
+        if (!response.ok || payload?.ok === false) {
+          const detail = payload && (payload.detail || payload.error || payload.message);
+          throw new Error(detail || `提交失败（${response.status}）`);
+        }
+        const eventId = payload?.event_id;
+        setStatus(eventId ? `再次优化任务已提交（ID: ${eventId}）。` : '再次优化请求已提交。', 'success');
+      } catch (err) {
+        console.error(err);
+        setStatus(err && err.message ? err.message : '请求失败，请稍后重试。', 'error');
+      } finally {
+        button.disabled = false;
+      }
+    }
+
+    // 页面初始化：从 URL 获取 openid
+    const params = new URLSearchParams(window.location.search);
+    const initialOpenid = (params.get('openid') || '').trim();
+    if (initialOpenid) {
+      openidInput.value = initialOpenid;
+      fetchResults(initialOpenid);
+    } else {
+      setStatus('请在上方输入 OpenID 并查询。', 'info');
+      openidInput.focus();
+    }
+  })();
+  </script>
+</body>
+</html>
+

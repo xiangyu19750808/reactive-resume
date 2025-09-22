@@ -1,0 +1,31 @@
+nohup: ignoring input
+INFO:     Started server process [313317]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     127.0.0.1:0 - "GET /results?openid=test HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/view HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEf4g.eKmZZIMEOPyFCUx52WuggZvmcAU%22,%22token%22:%22eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEf4g.eKmZZIMEOPyFCUx52WuggZvmcAU HTTP/1.0" 403 Forbidden
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgNg.AtQG5cAqdWt65dCvShg8CBiFQPU%22,%22token%22:%22eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgNg.AtQG5cAqdWt65dCvShg8CBiFQPU HTTP/1.0" 403 Forbidden
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgUg.qtHX0hGtDXzPzEkeNSLiav4aMcY%22,%22token%22:%22eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgUg.qtHX0hGtDXzPzEkeNSLiav4aMcY HTTP/1.0" 403 Forbidden
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgUg.qtHX0hGtDXzPzEkeNSLiav4aMcY%22,%22token%22:%22eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgUg.qtHX0hGtDXzPzEkeNSLiav4aMcY HTTP/1.0" 403 Forbidden
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgkw.Vbr9WodxXihFuRyLMELFxdBW1_k%22,%22token%22:%22eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEgkw.Vbr9WodxXihFuRyLMELFxdBW1_k HTTP/1.0" 403 Forbidden
+INFO:     127.0.0.1:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     127.0.0.1:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     127.0.0.1:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEhbw.HerEo9MNW_dadUrinXsTMXkGDjQ HTTP/1.0" 200 OK
+INFO:     115.190.5.251:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/dGVzdC9kZW1vLnBkZg/download?token=eyJyaWQiOiJkR1Z6ZEM5a1pXMXZMbkJrWmcifQ.aNEisA.rU8CeT6tSS11Q1GQ0zfuScDwLjo HTTP/1.0" 200 OK
+INFO:     204.76.203.212:0 - "GET / HTTP/1.0" 404 Not Found
+INFO:     127.0.0.1:0 - "POST /results/dGVzdC9kZW1vLnBkZg/reopt HTTP/1.0" 200 OK
+INFO:     127.0.0.1:0 - "GET /results?openid=test HTTP/1.0" 200 OK
+INFO:     127.0.0.1:0 - "GET /results?openid=otKoT2G7H6EoZ4wSa4iSvJmFPZ18 HTTP/1.0" 200 OK
+INFO:     14.212.115.201:0 - "GET /results/b3RLb1QyRzdINkVvWjR3U2E0aVN2Sm1GUFoxOC8xNzU4NTM2NjY2NTI2LnBkZg/view HTTP/1.0" 200 OK
+INFO:     127.0.0.1:0 - "GET /results?openid=test HTTP/1.0" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [313317]

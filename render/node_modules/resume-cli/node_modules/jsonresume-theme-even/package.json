@@ -1,0 +1,45 @@
+{
+  "name": "jsonresume-theme-even",
+  "version": "0.6.1",
+  "description": "A flat theme for JSON Resume, compatible with the bleeding edge resume schema",
+  "homepage": "https://github.com/rbardini/jsonresume-theme-even",
+  "bugs": {
+    "url": "https://github.com/rbardini/jsonresume-theme-even/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rbardini/jsonresume-theme-even"
+  },
+  "license": "MIT",
+  "author": "Rafael Bardini",
+  "files": [
+    "index.js",
+    "resume.hbs",
+    "partials/*.hbs",
+    "style.css"
+  ],
+  "scripts": {
+    "build:demo": "./bin/build-demo",
+    "format": "prettier --write .",
+    "lint": "eslint .",
+    "_postinstall": "husky install",
+    "postpublish": "pinst --enable",
+    "prepublishOnly": "pinst --disable",
+    "test": "tap"
+  },
+  "dependencies": {
+    "handlebars": "^4.7.6",
+    "micromark": "^2.11.4",
+    "striptags": "^3.1.1"
+  },
+  "devDependencies": {
+    "eslint": "7.20.0",
+    "html-validate": "4.6.0",
+    "husky": "5.0.9",
+    "lint-staged": "10.5.4",
+    "pinst": "2.1.4",
+    "prettier": "2.2.1",
+    "resume-schema": "1.0.0",
+    "tap": "14.11.0"
+  }
+}

@@ -1,0 +1,14 @@
+from importlib import import_module
+from fastapi import FastAPI
+app = FastAPI()
+for modname in ("c.result", "c.wx_oauth"):
+    try:
+        mod = import_module(modname)
+        sub_app = getattr(mod, "app", None)
+        if sub_app is not None:
+            app = sub_app
+        router = getattr(mod, "router", None)
+        if router is not None:
+            app.include_router(router)
+    except Exception:
+        pass

@@ -1,0 +1,1022 @@
+# /srv/wxresume/b/app.py
+# -*- coding: utf-8 -*-
+"""
+WXResume Function B（测试版）
+分层结构：
+0) 配置与常量
+1) 字体注册（_reg_font）
+2) HTTP 基础工具
+3) 飞书 API
+4) 取数小工具
+5) 解析层
+6) 路由（/, /test_font, /test_bitable, /test_parse）
+"""
+
+# ========== 0) 配置与常量 ==========
+import io, os, json, urllib.request
+from flask import Flask, send_file, jsonify
+from reportlab.pdfgen import canvas
+from reportlab.pdfbase import pdfmetrics
+from reportlab.pdfbase.ttfonts import TTFont
+from reportlab.lib.pagesizes import A4
+
+app = Flask(__name__)
+
+APP_TOKEN       = os.getenv("APP_TOKEN","").strip()
+TABLE_ID        = os.getenv("TABLE_ID","").strip()
+VIEW_ID         = os.getenv("VIEW_ID","").strip()
+LARK_APP_ID     = os.getenv("LARK_APP_ID","").strip()
+LARK_APP_SECRET = os.getenv("LARK_APP_SECRET","").strip()
+
+OPENID_FIELD    = os.getenv("OPENID_FIELD","openid").strip()
+COMPANY_FIELD   = os.getenv("COMPANY_FIELD","目标公司").strip()
+POSITION_FIELD  = os.getenv("POSITION_FIELD","目标岗位").strip()
+RESUME_FIELD    = os.getenv("RESUME_FIELD","简历文件").strip()
+AVATAR_FIELD    = os.getenv("AVATAR_FIELD","简历照片").strip()
+
+OUTPUT_DIR      = os.getenv("OUTPUT_DIR","/srv/wxresume/output").strip()
+FONT_PATH       = os.getenv("FONT_PATH","/srv/wxresume/fonts/NotoSansSC-Regular.ttf").strip()
+
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+# ========== 1) 字体注册 ==========
+def _reg_font():
+    if not os.path.exists(FONT_PATH):
+        raise FileNotFoundError(f"Font file not found: {FONT_PATH}")
+    try:
+        pdfmetrics.registerFont(TTFont("CNSans", FONT_PATH))
+    except Exception:
+        pass
+    try:
+        from reportlab.pdfbase.pdfmetrics import registerFontFamily
+        registerFontFamily("CNSans", normal="CNSans", bold="CNSans", italic="CNSans", boldItalic="CNSans")
+    except Exception:
+        pass
+    return "CNSans"
+
+
+# ========== 2) HTTP 基础工具 ==========
+def _http_get_json(url: str, headers: dict=None, timeout=30) -> dict:
+    req = urllib.request.Request(url, headers=headers or {}, method="GET")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+def _http_post_json(url: str, payload: dict, headers: dict=None, timeout=30) -> dict:
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    hdrs = {"Content-Type":"application/json"}
+    if headers: hdrs.update(headers)
+    req = urllib.request.Request(url, data=data, headers=hdrs, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read().decode("utf-8"))
+
+
+# ========== 3) 飞书 API ==========
+def _tenant_access_token() -> str:
+    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
+    j = _http_post_json(url, {"app_id": LARK_APP_ID, "app_secret": LARK_APP_SECRET})
+    tok = j.get("tenant_access_token")
+    if not tok: raise RuntimeError("get tenant_access_token failed")
+    return tok
+
+def _bitable_first_record() -> tuple:
+    tok = _tenant_access_token()
+    headers = {"Authorization": f"Bearer {tok}"}
+    qs = "?page_size=1" + (f"&view_id={VIEW_ID}" if VIEW_ID else "")
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{APP_TOKEN}/tables/{TABLE_ID}/records{qs}"
+    j = _http_get_json(url, headers=headers)
+    items = ((j.get("data") or {}).get("items")) or []
+    if not items: raise RuntimeError("No records in Bitable")
+    return items[0], tok
+
+def _download_media(file_token: str, tenant_token: str) -> bytes:
+    url = f"https://open.feishu.cn/open-apis/drive/v1/medias/{file_token}/download"
+    req = urllib.request.Request(url, headers={"Authorization": f"Bearer {tenant_token}"}, method="GET")
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return r.read()
+
+
+# ========== 4) 取数小工具 ==========
+def _plain(v):
+    if isinstance(v, list) and v and isinstance(v[0], dict) and "text" in v[0]:
+        return "".join([str(x.get("text","")) for x in v])
+    return str(v or "")
+
+def _first_file(val):
+    if isinstance(val, list) and val:
+        v = val[0]
+        if isinstance(v, dict) and v.get("file_token"):
+            return v
+    return None
+
+
+# ========== 5) 解析层 ==========
+def sanitize_text(text: str) -> str:
+    if not isinstance(text, str):
+        text = str(text or "")
+    text = text.replace("\x00", " ").replace("\r", "\n")
+    lines = [ln.strip() for ln in text.split("\n")]
+    clean, prev_blank = [], False
+    for ln in lines:
+        if not ln:
+            if not prev_blank:
+                clean.append("")
+            prev_blank = True
+        else:
+            clean.append(ln)
+            prev_blank = False
+    return "\n".join(clean).strip()
+
+def _fallback_decode(content: bytes) -> str:
+    if content is None:
+        return ""
+    for enc in ("utf-8", "gb18030", "latin-1"):
+        try:
+            return content.decode(enc)
+        except Exception:
+            continue
+    return content.decode("utf-8", errors="ignore")
+
+def _parse_docx(content: bytes) -> str:
+    from docx import Document
+    import io as _io
+    doc = Document(_io.BytesIO(content))
+    paras = [p.text for p in doc.paragraphs if p.text.strip()]
+    for tbl in getattr(doc, "tables", []) or []:
+        for row in tbl.rows:
+            row_txt = [cell.text.strip() for cell in row.cells if cell.text.strip()]
+            if row_txt:
+                paras.append(" | ".join(row_txt))
+    return "\n".join(paras)
+
+def _parse_pdf(content: bytes) -> str:
+    import io as _io
+    try:
+        from pdfminer.high_level import extract_text as _pdfminer_extract
+        return _pdfminer_extract(_io.BytesIO(content)) or ""
+    except Exception:
+        import PyPDF2
+        reader = PyPDF2.PdfReader(_io.BytesIO(content))
+        buf = []
+        for pg in reader.pages:
+            try:
+                t = pg.extract_text() or ""
+                if t.strip():
+                    buf.append(t)
+            except Exception:
+                continue
+        return "\n".join(buf)
+
+def extract_text_from_attachment(content: bytes, filename: str) -> str:
+    name = (filename or "").lower()
+    if name.endswith(".docx"):
+        raw = _parse_docx(content)
+    elif name.endswith(".pdf"):
+        raw = _parse_pdf(content)
+    elif name.endswith((".txt", ".md", ".csv")):
+        raw = _fallback_decode(content)
+    else:
+        raw = _fallback_decode(content)
+    return sanitize_text(raw)
+
+
+# ========== 6) 路由 ==========
+@app.route("/", methods=["GET"])
+def index():
+    return jsonify({"ok": True, "service": "resume-b", "tip": "/test_font | /test_bitable | /test_parse"})
+
+@app.route("/test_font", methods=["GET"])
+def test_font():
+    font_name = _reg_font()
+    out_path = os.path.join(OUTPUT_DIR, "font_test.pdf")
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    c.setFont(font_name, 20)
+    c.drawString(100, 750, "中文测试：你好，世界！")
+    c.drawString(100, 720, "Resume Service - 字体测试 OK")
+    c.save()
+    buf.seek(0)
+    with open(out_path, "wb") as f:
+        f.write(buf.getvalue())
+    return send_file(io.BytesIO(buf.getvalue()), mimetype="application/pdf",
+                     as_attachment=True, download_name="font_test.pdf")
+
+@app.route("/test_bitable", methods=["GET"])
+def test_bitable():
+    try:
+        rec, tok = _bitable_first_record()
+        fields = rec.get("fields") or {}
+        record_id = rec.get("record_id") or rec.get("id")
+
+        openid   = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        company  = _plain(fields.get(COMPANY_FIELD) or "未填公司")
+        position = _plain(fields.get(POSITION_FIELD) or "未填岗位")
+
+        outdir = os.path.join(OUTPUT_DIR, openid)
+        os.makedirs(outdir, exist_ok=True)
+
+        # 简历附件
+        resume_meta = None; resume_path = None
+        ro = _first_file(fields.get(RESUME_FIELD))
+        if ro:
+            try:
+                rb = _download_media(ro["file_token"], tok)
+                rname = ro.get("name") or "resume.bin"
+                resume_path = os.path.join(outdir, rname)
+                with open(resume_path, "wb") as f:
+                    f.write(rb)
+                resume_meta = {"name": rname, "size": len(rb)}
+            except Exception as e:
+                resume_meta = {"error": f"download resume failed: {e}"}
+
+        # 头像附件
+        avatar_meta = None; avatar_path = None
+        ao = _first_file(fields.get(AVATAR_FIELD))
+        if ao:
+            try:
+                ab = _download_media(ao["file_token"], tok)
+                aname = ao.get("name") or "avatar.bin"
+                avatar_path = os.path.join(outdir, aname)
+                with open(avatar_path, "wb") as f:
+                    f.write(ab)
+                avatar_meta = {"name": aname, "size": len(ab)}
+            except Exception as e:
+                avatar_meta = {"error": f"download avatar failed: {e}"}
+
+        return jsonify({
+            "ok": True,
+            "record_id": record_id,
+            "openid": openid,
+            "company": company,
+            "position": position,
+            "resume": {"meta": resume_meta, "path": resume_path},
+            "avatar": {"meta": avatar_meta, "path": avatar_path},
+            "outdir": outdir
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+
+@app.route("/test_parse", methods=["GET"])
+def test_parse():
+    """
+    生成两份解析文本：
+    1) 简历文件 → resume_parsed.txt
+    2) 目标公司 + 岗位JD → job_parsed.txt
+    """
+    try:
+        rec, _ = _bitable_first_record()
+        fields = rec.get("fields") or {}
+        openid = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        outdir = os.path.join(OUTPUT_DIR, openid)
+        os.makedirs(outdir, exist_ok=True)
+
+        # 1) 简历文件
+        resume_txt_path = None
+        ro = _first_file(fields.get(RESUME_FIELD))
+        if ro:
+            rname = ro.get("name") or "resume.bin"
+            resume_path = os.path.join(outdir, rname)
+            if os.path.exists(resume_path):
+                with open(resume_path, "rb") as f:
+                    rb = f.read()
+                resume_text = extract_text_from_attachment(rb, rname)
+                resume_txt_path = os.path.join(outdir, "resume_parsed.txt")
+                with open(resume_txt_path, "w", encoding="utf-8") as f:
+                    f.write(resume_text)
+
+        # 2) 公司+岗位JD
+        company = _plain(fields.get(COMPANY_FIELD) or "")
+        position = _plain(fields.get(POSITION_FIELD) or "")
+        job_text = f"目标公司：{company}\n目标岗位：{position}\n"
+        job_txt_path = os.path.join(outdir, "job_parsed.txt")
+        with open(job_txt_path, "w", encoding="utf-8") as f:
+            f.write(job_text)
+
+        return jsonify({
+            "ok": True,
+            "openid": openid,
+            "resume_parsed": resume_txt_path,
+            "job_parsed": job_txt_path
+        })
+
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+# ========== 7) 生成层（Moonshot 调用示例） ==========
+import requests
+
+MOONSHOT_API_KEY = os.getenv("MOONSHOT_API_KEY","").strip()
+
+def _call_moonshot(prompt: str, model="moonshot-v1-32k") -> str:
+    """
+    调用 Moonshot API，返回生成的文本
+    """
+    url = "https://api.moonshot.cn/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {MOONSHOT_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": "你是一位顶尖的简历分析与生成专家。"},
+            {"role": "user", "content": prompt}
+        ],
+        "temperature": 0.7
+    }
+    r = requests.post(url, headers=headers, json=payload, timeout=120)
+    r.raise_for_status()
+    j = r.json()
+    return j["choices"][0]["message"]["content"]
+
+@app.route("/test_generate_fix", methods=["GET"])
+def test_generate_fix():
+    """
+    使用解析后的 resume_parsed.txt + job_parsed.txt
+    调用 Moonshot API，返回两份结果：
+    1) 定制简历文本
+    2) 能力分析报告（含评分与面试问题）
+    """
+    try:
+        # 定位解析后的文件
+        rec, _ = _bitable_first_record()
+        fields = rec.get("fields") or {}
+        openid = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        outdir = os.path.join(OUTPUT_DIR, openid)
+
+        resume_path = os.path.join(outdir, "resume_parsed.txt")
+        job_path    = os.path.join(outdir, "job_parsed.txt")
+
+        if not (os.path.exists(resume_path) and os.path.exists(job_path)):
+            return jsonify({"ok": False, "error": "请先调用 /test_parse 生成解析文件"}), 400
+
+        with open(resume_path, "r", encoding="utf-8") as f:
+            resume_text = f.read()
+        with open(job_path, "r", encoding="utf-8") as f:
+            job_text = f.read()
+
+        # Prompt 1: 定制简历
+        prompt_resume = f"以下是用户的简历：\n{resume_text}\n\n以下是目标公司及岗位需求：\n{job_text}\n\n请你基于这些信息，为用户生成一份专业简历，目标是让用户通过HR初筛。"
+        gen_resume = _call_moonshot(prompt_resume)
+
+        # Prompt 2: 分析报告
+        prompt_analysis = f"以下是用户的简历：\n{resume_text}\n\n以下是目标公司及岗位需求：\n{job_text}\n\n请你输出：\n1. 用户能力全方位评估（用分点形式，最后附评分表）\n2. 用户与岗位匹配度打分并说明理由\n3. 预测HR在二面中可能会问的5-10个问题\n4. 若有其他对用户有价值的提醒也请补充。"
+        gen_analysis = _call_moonshot(prompt_analysis)
+
+        return jsonify({
+            "ok": True,
+            "openid": openid,
+            "generated_resume": gen_resume,
+            "analysis_report": gen_analysis
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+# ===== 生成层最小测试路由：/test_generate =====
+@app.route("/test_generate_fix", methods=["GET"])
+def test_generate_fix():
+    """
+    读取 /test_parse 落盘的 resume_parsed.txt 与 job_parsed.txt，
+    调用 Moonshot 生成两份文本，并落盘：
+      - resume_generated.txt（面向目标公司/岗位的定制简历）
+      - analysis_generated.txt（能力评估+匹配度+面试问题）
+    """
+    try:
+        import requests, os
+
+        key = os.getenv("MOONSHOT_API_KEY", "").strip()
+        if not key:
+            return jsonify({"ok": False, "error": "MOONSHOT_API_KEY 未设置"}), 400
+        api_base = os.getenv("MOONSHOT_API_BASE", "https://api.moonshot.cn/v1").strip()
+        model    = os.getenv("MOONSHOT_MODEL", "moonshot-v1-32k").strip()
+
+        # 取 openid 与输出目录
+        rec, _ = _bitable_first_record()
+        fields = rec.get("fields") or {}
+        openid = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        outdir = os.path.join(OUTPUT_DIR, openid)
+
+        resume_txt = os.path.join(outdir, "resume_parsed.txt")
+        job_txt    = os.path.join(outdir, "job_parsed.txt")
+        if not os.path.exists(resume_txt) or not os.path.exists(job_txt):
+            return jsonify({"ok": False, "error": "缺少解析文件，请先调用 /test_parse"}), 400
+
+        with open(resume_txt, "r", encoding="utf-8", errors="ignore") as f:
+            resume_text = f.read()
+        with open(job_txt, "r", encoding="utf-8", errors="ignore") as f:
+            job_text = f.read()
+
+        def _call_moonshot(prompt: str) -> str:
+            url = api_base.rstrip("/") + "/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role":"system","content":"你是顶尖级简历分析与生成专家。所有输出为中文，务实、简洁、可执行。"},
+                    {"role":"user","content": prompt}
+                ],
+                "temperature": 0.3,
+                "stream": False
+            }
+            r = requests.post(url, headers=headers, json=payload, timeout=120)
+            r.raise_for_status()
+            j = r.json()
+            return (j.get("choices") or [{}])[0].get("message", {}).get("content", "").strip()
+
+        # 1) 定制简历
+        prompt_resume = (
+            "以下是用户原始简历文本：\n<<<" + resume_text + ">>>\n\n"
+            "以下是目标公司与岗位信息：\n<<<" + job_text + ">>>\n\n"
+            "请基于以上信息，为该岗位生成一份‘投递版’专业简历：\n"
+            "- 只保留与岗位强相关的经历与能力；\n"
+            "- 要点用动宾结构 + 量化结果；\n"
+            "- 不杜撰经历；\n"
+            "- 输出为可直接复制粘贴的纯文本简历。"
+        )
+        gen_resume = _call_moonshot(prompt_resume)
+
+        # 2) 分析报告
+        prompt_analysis = (
+            "以下是用户原始简历文本：\n<<<" + resume_text + ">>>\n\n"
+            "以下是目标公司与岗位信息：\n<<<" + job_text + ">>>\n\n"
+            "请输出分析报告（纯文本）：\n"
+            "a) 用户能力全方位评估（分点，最后附10分制评分表）\n"
+            "b) 用户能力与岗位需求匹配度评分，并说明主要理由（要点化）\n"
+            "c) 预测HR在二面可能会问的5-10个问题，简短不赘述\n"
+            "d) 任何有助于通过二面的补充建议（如补档、作品集、量化数据等）"
+        )
+        gen_analysis = _call_moonshot(prompt_analysis)
+
+        # 落盘
+        gen_resume_path   = os.path.join(outdir, "resume_generated.txt")
+        gen_analysis_path = os.path.join(outdir, "analysis_generated.txt")
+        with open(gen_resume_path, "w", encoding="utf-8") as f:
+            f.write(gen_resume)
+        with open(gen_analysis_path, "w", encoding="utf-8") as f:
+            f.write(gen_analysis)
+
+        return jsonify({
+            "ok": True,
+            "openid": openid,
+            "resume_generated": gen_resume_path,
+            "analysis_generated": gen_analysis_path,
+            "preview": {
+                "resume": gen_resume[:200],
+                "analysis": gen_analysis[:200]
+            }
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+
+# ===== 专业版生成层测试路由：/test_generate_pro（不改旧路由） =====
+@app.route("/test_generate_pro", methods=["GET"])
+def test_generate_pro():
+    """
+    基于 resume_parsed.txt + job_parsed.txt 生成更专业的两份产物：
+      1) resume_generated_pro.txt  —— 面向目标公司的投递版简历（顶尖水准）
+      2) analysis_generated_pro.txt —— 能力全评 + 匹配度 + 预测面试问题（顶尖水准）
+         同时落盘结构化 JSON：analysis_generated_pro.json（含 scores 与 chart_spec，便于后续彩色图表渲染）
+    """
+    try:
+        import os, json, requests, re
+
+        key = os.getenv("MOONSHOT_API_KEY","").strip()
+        if not key:
+            return jsonify({"ok": False, "error": "MOONSHOT_API_KEY 未设置"}), 400
+        api_base = os.getenv("MOONSHOT_API_BASE","https://api.moonshot.cn/v1").strip()
+        model    = os.getenv("MOONSHOT_MODEL","moonshot-v1-32k").strip()
+
+        # 取首条记录 + 输出目录
+        rec, _ = _bitable_first_record()
+        fields   = rec.get("fields") or {}
+        openid   = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        company  = _plain(fields.get(COMPANY_FIELD) or "")
+        position = _plain(fields.get(POSITION_FIELD) or "")
+        outdir   = os.path.join(OUTPUT_DIR, openid)
+
+        resume_txt = os.path.join(outdir, "resume_parsed.txt")
+        job_txt    = os.path.join(outdir, "job_parsed.txt")
+        if not (os.path.exists(resume_txt) and os.path.exists(job_txt)):
+            return jsonify({"ok": False, "error": "缺少解析文件，请先调用 /test_parse"}), 400
+
+        with open(resume_txt, "r", encoding="utf-8", errors="ignore") as f:
+            resume_text = f.read()
+        with open(job_txt, "r", encoding="utf-8", errors="ignore") as f:
+            job_text = f.read()
+
+        def _call_moonshot_local(prompt: str, temperature=0.25) -> str:
+            url = api_base.rstrip("/") + "/chat/completions"
+            headers = {"Authorization": f"Bearer {key}", "Content-Type":"application/json"}
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role":"system","content":"你是世界级招聘专家与简历教练，输出专业、精准、务实的中文内容。"},
+                    {"role":"user","content": prompt}
+                ],
+                "temperature": float(temperature),
+                "stream": False
+            }
+            r = requests.post(url, headers=headers, json=payload, timeout=120)
+            r.raise_for_status()
+            j = r.json()
+            return (j.get("choices") or [{}])[0].get("message", {}).get("content","").strip()
+
+        # ---- 产物一：投递版简历（顶尖水准） ----
+        prompt_resume = f"""# 目标
+基于“用户真实简历文本”与“目标公司+岗位JD”，生成一份**HR初筛高通过率**的投递版专业简历（纯文本）。
+【目标公司】{company}
+【目标岗位】{position}
+【岗位JD原文】<<<{job_text}>>>
+【用户原始简历文本】<<<{resume_text}>>>
+
+# 输出要求（严格遵守）
+- 结构：抬头(姓名/目标职位/联系方式)；求职目标(≤2行)；核心优势(3-5条、动宾结构+量化)；
+  关键业绩(6-10条、每条含动作+方法+指标提升)；核心技能(工具/方法/行业)；经历(逆序、与岗位强相关部分优先)；
+  教育/证书；补充信息（如可入职时间/城市偏好）。
+- 只保留与“{position}”强相关的信息；不得杜撰或夸大无凭证数据。
+- 用短句、去口语化；量化指标尽量具体（如“转化率+18%”“成本-12%”“周期从10天→3天”）。
+- 输出为**可直接投递**的中文纯文本；不加解释说明，不输出多余段落。"""
+
+        resume_out = _call_moonshot_local(prompt_resume, temperature=0.2)
+
+        # ---- 产物二：能力评估+匹配度+面试问题（顶尖水准，含结构化JSON以供彩色图表渲染） ----
+        schema = {
+            "scores":[{"dimension":"string","score":0.0}],
+            "rationales":{"维度":"简明理由"},
+            "summary":"<=60字要点总结",
+            "interview_questions":["5-10条"],
+            "chart_spec":{"type":"bar","title":"能力结构","data":[{"name":"维度","value":0.0}]}
+        }
+        prompt_analysis_json = f"""严格**仅输出 JSON**，匹配此 SCHEMA（字段名保持一致）：
+SCHEMA={json.dumps(schema, ensure_ascii=False)}
+评分范围0~10，保留1位小数；覆盖但不限于这些维度：
+["岗位匹配度","团队管理","项目落地能力","数据与度量意识","沟通影响力","问题分解与结构化","学习适应力","成本与风险控制","工具与自动化能力","职业稳定性"]
+背景：
+【目标公司】{company}
+【目标岗位】{position}
+【岗位JD原文】<<<{job_text}>>>
+【用户原始简历文本】<<<{resume_text}>>>
+要求：
+- "scores"：每个维度一个对象{{dimension, score}}，分数数值型；
+- "rationales"：对每个维度给出1-2句理由；
+- "summary"：≤60字；
+- "interview_questions"：给出5-10条**极可能**被追问的二面问题（短句、直击能力验证）；
+- "chart_spec"：柱状图配置，data 数组与 scores 对应，用于后续彩色渲染。"""
+        out_json_text = _call_moonshot_local(prompt_analysis_json, temperature=0.2)
+
+        def _safe_load_json(s: str) -> dict:
+            try:
+                return json.loads(s)
+            except Exception:
+                m = re.search(r'\{.*\}', s, re.S)
+                if m:
+                    try:
+                        return json.loads(m.group(0))
+                    except Exception:
+                        pass
+            return {"scores":[], "rationales":{}, "summary":"", "interview_questions":[], "chart_spec":{"type":"bar","data":[]}}
+
+        analysis_obj = _safe_load_json(out_json_text)
+
+        # 生成可读报告文本
+        lines = []
+        lines.append(f"# 能力评估与岗位匹配报告｜{company}｜{position}")
+        lines.append("")
+        if analysis_obj.get("summary"):
+            lines.append("## 摘要")
+            lines.append(analysis_obj["summary"])
+            lines.append("")
+        if analysis_obj.get("scores"):
+            lines.append("## 匹配度评分（/10）")
+            for s in analysis_obj["scores"]:
+                try:
+                    val = float(s.get("score", 0))
+                except Exception:
+                    val = 0.0
+                dim = str(s.get("dimension","")).strip() or "未命名"
+                lines.append(f"- {dim}：{round(max(0.0,min(10.0,val)),1)}")
+            lines.append("")
+        if analysis_obj.get("rationales"):
+            lines.append("## 维度说明")
+            for k,v in (analysis_obj["rationales"] or {}).items():
+                lines.append(f"- {k}：{str(v).strip()}")
+            lines.append("")
+        if analysis_obj.get("interview_questions"):
+            lines.append("## 预测二面问题（练习清单）")
+            for q in analysis_obj["interview_questions"][:10]:
+                lines.append(f"- {str(q).strip()}")
+            lines.append("")
+        # 说明 chart_spec 已生成，后续用于彩色图表渲染（PDF阶段再画）
+        if analysis_obj.get("chart_spec"):
+            lines.append("（已生成 chart_spec，后续渲染层将输出彩色图表）")
+
+        # 落盘
+        resume_pro_path   = os.path.join(outdir, "resume_generated_pro.txt")
+        analysis_txt_path = os.path.join(outdir, "analysis_generated_pro.txt")
+        analysis_json_path= os.path.join(outdir, "analysis_generated_pro.json")
+        with open(resume_pro_path, "w", encoding="utf-8") as f:
+            f.write(resume_out.strip())
+        with open(analysis_txt_path, "w", encoding="utf-8") as f:
+            f.write("\n".join(lines).strip()+"\n")
+        with open(analysis_json_path, "w", encoding="utf-8") as f:
+            json.dump(analysis_obj, f, ensure_ascii=False, indent=2)
+
+        # 预览
+        preview_scores = (analysis_obj.get("scores") or [])[:5]
+        preview_qs     = (analysis_obj.get("interview_questions") or [])[:5]
+
+        return jsonify({
+            "ok": True,
+            "openid": openid,
+            "company": company,
+            "position": position,
+            "resume_generated_pro": resume_pro_path,
+            "analysis_generated_pro": analysis_txt_path,
+            "analysis_json": analysis_json_path,
+            "preview": {
+                "resume_head": resume_out[:200],
+                "scores_top5": preview_scores,
+                "questions_top5": preview_qs
+            }
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+
+
+# ========== 8) 渲染层（PDF + 图表，精准版：先只做“简历 PDF”） ==========
+from reportlab.lib import colors
+from reportlab.lib.units import mm
+from reportlab.lib.utils import ImageReader, simpleSplit
+from reportlab.pdfgen import canvas as _pdf_canvas
+from reportlab.graphics.shapes import Drawing, Rect, String
+from reportlab.graphics import renderPM
+import time, glob, re
+
+# 主题色与线
+THEME_PRIMARY = colors.HexColor("#1AC3B0")   # 贴近示例的青绿色
+THEME_TEXT    = colors.HexColor("#222222")
+THEME_SUB     = colors.HexColor("#6C757D")
+THEME_LINE    = colors.HexColor("#E5F2EF")
+
+# 页边与模块高度
+MARGIN_L = 18*mm
+MARGIN_R = 18*mm
+MARGIN_T = 18*mm
+MARGIN_B = 18*mm
+HEADER_H = 32*mm     # 顶部横幅高度
+SECT_GAP = 8*mm      # 各分节之间的垂直间距
+LINE_H   = 14        # 正文字行高
+
+def now_ts():
+    import time as _t
+    return _t.strftime("%Y%m%d_%H%M%S", _t.localtime())
+
+def _pick_avatar(outdir: str) -> str:
+    for ext in ("*.jpg","*.jpeg","*.png"):
+        files = sorted(glob.glob(os.path.join(outdir, ext)))
+        if files: return files[0]
+    return None
+
+def _wrap(c, text, x, y, max_w, font, size, leading):
+    c.setFont(font, size)
+    for para in (text or "").split("\n"):
+        lines = simpleSplit(para.strip(), font, size, max_w) or [""]
+        for ln in lines:
+            c.drawString(x, y, ln)
+            y -= leading
+    return y
+
+def _bullets(c, items, x, y, max_w, font, size, leading, max_items=20):
+    c.setFont(font, size)
+    shown = 0
+    for it in (items or []):
+        it = it.strip("•·*- 　\t")
+        if not it: 
+            continue
+        shown += 1
+        if shown > max_items:
+            c.drawString(x, y, "…")
+            y -= leading
+            break
+        lines = simpleSplit(it, font, size, max_w-10)
+        c.setFillColor(THEME_TEXT)
+        c.circle(x+1.8, y+size*0.33, 1.4, fill=1, stroke=0)
+        for ln_i, ln in enumerate(lines):
+            c.drawString(x+8, y, ln)
+            y -= leading
+    return y
+
+def _need_new_page(y, need, page_h):
+    return (y - need) < MARGIN_B
+
+def _header_banner(c, font, name, company, position, avatar_path):
+    """顶横幅（青绿+左侧楔形），右上头像；下方留白作为“基本信息”区。"""
+    page_w, page_h = A4
+    top_y = page_h - MARGIN_T
+    # 实心横幅
+    c.setFillColor(THEME_PRIMARY)
+    c.rect(0, top_y - HEADER_H, page_w, HEADER_H, fill=1, stroke=0)
+    # 左侧楔形（斜角）
+    p = c.beginPath()
+    p.moveTo(MARGIN_L, top_y - HEADER_H)              # 左下
+    p.lineTo(MARGIN_L + 16*mm, top_y - HEADER_H)      # 向右
+    p.lineTo(MARGIN_L + 26*mm, top_y - HEADER_H + 10*mm)  # 斜上
+    p.lineTo(MARGIN_L, top_y - HEADER_H + 10*mm)      # 回到左侧
+    p.close()
+    c.setFillColor(colors.white, alpha=0.35)
+    c.drawPath(p, fill=1, stroke=0)
+
+    # 标题：个人简历 PERSONAL RESUME
+    c.setFillColor(colors.white)
+    c.setFont(font, 18); c.drawString(MARGIN_L + 10*mm, top_y - HEADER_H + 18*mm, "个人简历")
+    c.setFont(font, 11); c.drawString(MARGIN_L + 10*mm + 46*mm, top_y - HEADER_H + 18*mm, "PERSONAL RESUME")
+
+    # 右上头像
+    if avatar_path and os.path.exists(avatar_path):
+        try:
+            img = ImageReader(avatar_path)
+            box = 28*mm
+            ix = page_w - MARGIN_R - box
+            iy = top_y - HEADER_H + 2*mm
+            c.drawImage(img, ix, iy, box, box, preserveAspectRatio=True, mask='auto')
+        except Exception:
+            pass
+
+    # 下边界白线
+    c.setStrokeColor(THEME_LINE); c.setLineWidth(2)
+    c.line(MARGIN_L, top_y - HEADER_H - 2*mm, page_w - MARGIN_R, top_y - HEADER_H - 2*mm)
+
+    # 基本信息（姓名 + 目标）
+    c.setFillColor(THEME_TEXT)
+    c.setFont(font, 16)
+    c.drawString(MARGIN_L, top_y - HEADER_H - 10*mm, name or "候选人")
+    c.setFont(font, 10.5)
+    c.setFillColor(THEME_SUB)
+    comp_pos = f"目标公司：{(company or '-').strip()}"
+    if position: comp_pos += f"    目标岗位：{str(position).replace(chr(10),' ').strip()}"
+    c.drawString(MARGIN_L, top_y - HEADER_H - 16*mm, comp_pos)
+
+def _basic_info(c, font, phone, email, y_start):
+    """基本信息一行两列：电话 / 邮箱"""
+    page_w, _ = A4
+    y = y_start
+    c.setFont(font, 10.5)
+    c.setFillColor(THEME_SUB)
+    c.drawString(MARGIN_L, y, f"电话：{phone or '-'}")
+    c.drawString(MARGIN_L + 70*mm, y, f"邮箱：{email or '-'}")
+    return y - 10*mm
+
+def _section_bar(c, font, title, y, icon_char):
+    """分节条（左色块+图标位+粗标题+横线）"""
+    page_w, _ = A4
+    # 左色块（方）
+    c.setFillColor(THEME_PRIMARY)
+    c.rect(MARGIN_L, y-7, 7*mm, 7*mm, fill=1, stroke=0)
+    # “图标位”（用字母代替，保持风格）
+    c.setFillColor(colors.white)
+    c.setFont(font, 11)
+    c.drawCentredString(MARGIN_L + 3.5*mm, y-3.5, icon_char)
+    # 标题
+    c.setFillColor(THEME_TEXT)
+    c.setFont(font, 13)
+    c.drawString(MARGIN_L + 9*mm, y-3, title)
+    # 细分隔线
+    c.setStrokeColor(THEME_LINE); c.setLineWidth(1)
+    c.line(MARGIN_L + 9*mm, y-9, page_w - MARGIN_R, y-9)
+    return y - 12*mm
+
+def _parse_resume_blocks(resume_text: str, fallback_name="候选人"):
+    """从解析文本里抽：姓名/电话/邮箱 & 常见块"""
+    t = (resume_text or "").strip()
+    name  = (re.search(r"^([^\|\s]{2,8})\s*\|", t, re.M) or re.search(r"^([^\s]{2,8})$", t.splitlines()[0]) or None)
+    name  = (name.group(1) if name else fallback_name)
+    phone = (re.search(r"(?:(?<!\d)|\b)(1[3-9]\d{9})(?:\b|(?!\d))", t) or None)
+    phone = phone.group(1) if phone else ""
+    email = (re.search(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}", t) or None)
+    email = email.group(0) if email else ""
+
+    def pick(label):
+        patt = rf"^\s*{label}\s*[:：\-]?\s*$"
+        m = [m.start() for m in re.finditer(patt, t, re.I|re.M)]
+        if not m: return ""
+        start = m[0]
+        after = t[start:]
+        nxt = re.search(r"^\s*(个人简介|求职目标|关键业绩|工作经历|项目经历|核心技能|教育经历|证书|奖项|附加信息)\s*[:：\-]?\s*$", after, re.I|re.M)
+        end = start + (nxt.start() if nxt else len(after))
+        block = t[start:].split("\n",1)[1] if "\n" in t[start:] else ""
+        return block[:(end-start)].strip()
+
+    def lines(b):
+        return [ln.strip("•·*- 　\t") for ln in (b or "").splitlines() if ln.strip()]
+
+    return {
+        "name": name,
+        "phone": phone,
+        "email": email,
+        "intro": pick("个人简介"),
+        "target": pick("求职目标"),
+        "intent_type": "",   # 可从简历里再挖，先留空
+        "works": lines(pick("工作经历") or pick("经历")),
+        "projs": lines(pick("项目经历") or pick("项目")),
+        "skills": lines(pick("核心技能") or pick("技能")),
+        "edu": lines(pick("教育经历") or pick("教育")),
+    }
+
+def build_resume_pdf(resume_text: str, company: str, position: str, avatar_path: str=None) -> bytes:
+    """
+    版式对齐示例图：
+    1) 顶横幅（青绿+斜角）+ 右上头像
+    2) 基本信息一行：电话 / 邮箱
+    3) 求职意向（两列：意向岗位 / 求职类型）
+    4) 工作经历（日期粗体、公司名右对齐、条目点）
+    5) 项目经历
+    6) 相关技能
+    """
+    buf = io.BytesIO()
+    c = _pdf_canvas.Canvas(buf, pagesize=A4)
+    page_w, page_h = A4
+    font = _reg_font()
+
+    # 解析文本
+    P = _parse_resume_blocks(resume_text, "候选人")
+
+    # 顶横幅
+    _header_banner(c, font, P["name"], company, position, avatar_path)
+    y = page_h - MARGIN_T - HEADER_H - 6*mm
+
+    # 基本信息行
+    y = _basic_info(c, font, P["phone"], P["email"], y)
+
+    # —— 求职意向
+    if _need_new_page(y, 22*mm, page_h): c.showPage(); _header_banner(c, font, P["name"], company, position, avatar_path); y = page_h - MARGIN_T - HEADER_H - 6*mm
+    y = _section_bar(c, font, "求职意向", y, "意")
+    c.setFont(font, 10.5); c.setFillColor(THEME_TEXT)
+    # 左右两列
+    c.drawString(MARGIN_L + 4*mm, y, f"意向岗位：{(str(position) or '-').replace(chr(10),' ')}")
+    c.drawString(MARGIN_L + 84*mm, y, f"求职类型：{P['intent_type'] or '社招'}")
+    y -= 10*mm
+
+    # —— 工作经历
+    if P["works"]:
+        if _need_new_page(y, 40*mm, page_h): c.showPage(); _header_banner(c, font, P["name"], company, position, avatar_path); y = page_h - MARGIN_T - HEADER_H - 6*mm
+        y = _section_bar(c, font, "工作经历（要点）", y, "工")
+        # 尝试识别“时间段 + 职位 + 公司”
+        # 识别第一个条目中的公司名并右对齐
+        right_company = ""
+        for ln in P["works"][:1]:
+            parts = re.split(r"[｜|]+", ln)
+            if len(parts) >= 1:
+                guess = parts[0].strip()
+                if 2 <= len(guess) <= 20:
+                    right_company = guess
+        if right_company:
+            c.setFont(font, 10.5); c.setFillColor(THEME_SUB)
+            c.drawRightString(page_w - MARGIN_R, y + 2, right_company)
+
+        # 显示首行若包含时间：加粗
+        date_pat = re.compile(r"\d{4}\.\d{1,2}\s*[-—~至]\s*(?:今|至今|\d{4}\.\d{1,2})")
+        if P["works"]:
+            first = P["works"][0]
+            first_date = (date_pat.search(first) or None)
+            if first_date:
+                c.setFillColor(THEME_TEXT); c.setFont(font, 11.5)
+                y = _wrap(c, first_date.group(0), MARGIN_L + 4*mm, y, page_w - MARGIN_L - MARGIN_R - 4*mm, font, 11.5, LINE_H)
+        # 全量条目
+        y = _bullets(c, P["works"], MARGIN_L + 4*mm, y, page_w - MARGIN_L - MARGIN_R - 4*mm, font, 10.5, LINE_H, max_items=18)
+        y -= SECT_GAP
+
+    # —— 项目经历
+    if P["projs"]:
+        if _need_new_page(y, 30*mm, page_h): c.showPage(); _header_banner(c, font, P["name"], company, position, avatar_path); y = page_h - MARGIN_T - HEADER_H - 6*mm
+        y = _section_bar(c, font, "项目经历", y, "项")
+        y = _bullets(c, P["projs"], MARGIN_L + 4*mm, y, page_w - MARGIN_L - MARGIN_R - 4*mm, font, 10.5, LINE_H, max_items=12)
+        y -= SECT_GAP
+
+    # —— 相关技能
+    if P["skills"]:
+        if _need_new_page(y, 24*mm, page_h): c.showPage(); _header_banner(c, font, P["name"], company, position, avatar_path); y = page_h - MARGIN_T - HEADER_H - 6*mm
+        y = _section_bar(c, font, "相关技能", y, "技")
+        y = _bullets(c, P["skills"], MARGIN_L + 4*mm, y, page_w - MARGIN_L - MARGIN_R - 4*mm, font, 10.5, LINE_H, max_items=12)
+
+    # —— 教育经历（有则加在末尾）
+    if P["edu"]:
+        if _need_new_page(y, 20*mm, page_h): c.showPage(); _header_banner(c, font, P["name"], company, position, avatar_path); y = page_h - MARGIN_T - HEADER_H - 6*mm
+        y = _section_bar(c, font, "教育经历", y, "教")
+        y = _bullets(c, P["edu"], MARGIN_L + 4*mm, y, page_w - MARGIN_L - MARGIN_R - 4*mm, font, 10.5, LINE_H, max_items=8)
+
+    c.showPage(); c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+# 兼容原接口（分析图先保留，不动其它业务）
+def render_chart(scores) -> bytes:
+    try:
+        items = [(str(s.get("dimension","")), float(s.get("score",0))) for s in (scores or [])]
+        items = items[:10] if items else [("无数据", 0.0)]
+        w, bar_h, gap, left = 640, 26, 10, 160
+        h = 40 + (bar_h+gap)*len(items) + 30
+        d = Drawing(w, h)
+        d.add(Rect(0, 0, w, h, fillColor=colors.white, strokeColor=None))
+        d.add(String(20, h-28, "能力结构（0-10）", fontName=_reg_font(), fontSize=14, fillColor=THEME_PRIMARY))
+        y = h-70
+        for dim, sc in items:
+            sc = max(0.0, min(10.0, sc))
+            bw = int((w-left-40) * (sc/10.0))
+            d.add(String(20, y+6, dim[:12], fontName=_reg_font(), fontSize=10, fillColor=THEME_TEXT))
+            d.add(Rect(left, y, w-left-40, bar_h, fillColor=colors.HexColor("#F0F5FF"), strokeColor=None))
+            d.add(Rect(left, y, bw, bar_h, fillColor=THEME_PRIMARY, strokeColor=None))
+            d.add(String(left+bw+6, y+6, f"{sc:.1f}", fontName=_reg_font(), fontSize=10, fillColor=THEME_TEXT))
+            y -= (bar_h+gap)
+        return renderPM.drawToString(d, fmt="PNG")
+    except Exception:
+        return None
+
+def build_analysis_pdf(company: str, position: str, analysis_text: str, scores: list) -> bytes:
+    buf = io.BytesIO()
+    c = _pdf_canvas.Canvas(buf, pagesize=A4)
+    page_w, page_h = A4
+    font = _reg_font()
+    c.setFillColor(THEME_PRIMARY); c.rect(MARGIN_L, page_h - MARGIN_T - 16*mm, page_w- MARGIN_L - MARGIN_R, 12*mm, fill=1, stroke=0)
+    c.setFillColor(colors.white); c.setFont(font, 16)
+    c.drawString(MARGIN_L+6*mm, page_h - MARGIN_T - 8*mm, f"岗位匹配度分析 · {company} · {position}")
+    y = page_h - MARGIN_T - 30*mm
+    chart_png = render_chart(scores)
+    if chart_png:
+        try:
+            img = ImageReader(io.BytesIO(chart_png))
+            c.drawImage(img, MARGIN_L, y-65*mm, page_w - MARGIN_L - MARGIN_R, 65*mm, preserveAspectRatio=True, mask='auto')
+            y -= 72*mm
+        except Exception:
+            pass
+    c.setFillColor(THEME_TEXT)
+    y = _wrap(c, analysis_text or "（分析内容稍后补充）", MARGIN_L, y, page_w - MARGIN_L - MARGIN_R, font, 11, 16)
+    c.showPage(); c.save()
+    buf.seek(0)
+    return buf.getvalue()
+# ========== 8) 渲染层（END） ==========
+
+
+
+# ===== 渲染层测试路由：/test_render_pro（基于已生成的专业版文本/JSON） =====
+@app.route("/test_render_pro", methods=["GET"])
+def test_render_pro():
+    try:
+        # 基于 bitable 首条记录定位 openid & outdir
+        rec, _ = _bitable_first_record()
+        fields   = rec.get("fields") or {}
+        openid   = (_plain(fields.get(OPENID_FIELD)) or "unknown").strip() or "unknown"
+        company  = _plain(fields.get(COMPANY_FIELD) or "")
+        position = _plain(fields.get(POSITION_FIELD) or "")
+        outdir   = os.path.join(OUTPUT_DIR, openid)
+
+        # 输入文件（来自前一步 /test_generate_pro）
+        resume_pro_txt = os.path.join(outdir, "resume_generated_pro.txt")
+        analysis_pro_txt= os.path.join(outdir, "analysis_generated_pro.txt")
+        analysis_pro_json= os.path.join(outdir, "analysis_generated_pro.json")
+        if not (os.path.exists(resume_pro_txt) and os.path.exists(analysis_pro_txt) and os.path.exists(analysis_pro_json)):
+            return jsonify({"ok": False, "error": "缺少生成文件，请先调用 /test_generate_pro"}), 400
+
+        with open(resume_pro_txt, "r", encoding="utf-8", errors="ignore") as f:
+            resume_text = f.read()
+        with open(analysis_pro_txt, "r", encoding="utf-8", errors="ignore") as f:
+            analysis_text = f.read()
+        with open(analysis_pro_json, "r", encoding="utf-8") as f:
+            analysis_obj = json.load(f)
+        scores = analysis_obj.get("scores", [])
+
+        avatar_path = _pick_avatar(outdir)
+
+        # 生成两份 PDF
+        resume_pdf   = build_resume_pdf(resume_text, company, position, avatar_path)
+        analysis_pdf = build_analysis_pdf(company, position, analysis_text, scores)
+
+        ts = now_ts()
+        resume_path   = os.path.join(outdir, f"resume_{ts}.pdf")
+        analysis_path = os.path.join(outdir, f"analysis_{ts}.pdf")
+        _save_bytes(resume_path, resume_pdf)
+        _save_bytes(analysis_path, analysis_pdf)
+
+        return jsonify({
+            "ok": True,
+            "openid": openid,
+            "company": company,
+            "position": position,
+            "resume_path": resume_path,
+            "analysis_path": analysis_path
+        })
+    except Exception as e:
+        import traceback
+        return jsonify({"ok": False, "error": str(e), "trace": traceback.format_exc()}), 500
+
+
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8002)

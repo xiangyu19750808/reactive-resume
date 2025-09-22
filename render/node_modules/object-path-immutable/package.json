@@ -1,0 +1,71 @@
+{
+  "name": "object-path-immutable",
+  "version": "4.1.2",
+  "description": "Modify deep object properties without modifying the original object (immutability). Works great with React and Redux.",
+  "author": "Mario Casciaro <m@mario.fyi>",
+  "license": "MIT",
+  "homepage": "https://github.com/mariocasciaro/object-path-immutable",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/mariocasciaro/object-path-immutable.git"
+  },
+  "types": "./object-path-immutable.d.ts",
+  "engines": {
+    "node": ">=0.10.0"
+  },
+  "main": "cjs/object-path-immutable.js",
+  "module": "esm/object-path-immutable.js",
+  "sideEffects": false,
+  "scripts": {
+    "build": "rollup -c",
+    "standard": "standard",
+    "test": "npm run build && mocha test/test.js",
+    "coveralls": "nyc npm test && nyc report --reporter=text-lcov | coveralls",
+    "coverage": "nyc npm test",
+    "prepublish": "npm run coverage",
+    "standard-fix": "standard --fix"
+  },
+  "dependencies": {
+    "is-plain-object": "^5.0.0",
+    "object-path": "^0.11.8"
+  },
+  "devDependencies": {
+    "chai": "^4.3.4",
+    "coveralls": "^3.1.1",
+    "mocha": "^9.1.1",
+    "mocha-lcov-reporter": "^1.3.0",
+    "nyc": "^15.1.0",
+    "rollup": "^1.32.1",
+    "rollup-plugin-commonjs": "^10.1.0",
+    "rollup-plugin-node-resolve": "^5.2.0",
+    "standard": "^16.0.3"
+  },
+  "keywords": [
+    "deep",
+    "path",
+    "access",
+    "get",
+    "property",
+    "dot",
+    "prop",
+    "object",
+    "obj",
+    "notation",
+    "segment",
+    "value",
+    "nested",
+    "key",
+    "immutable",
+    "immutability",
+    "react",
+    "redux",
+    "state"
+  ],
+  "standard": {
+    "ignore": [
+      "umd",
+      "esm",
+      "cjs"
+    ]
+  }
+}
