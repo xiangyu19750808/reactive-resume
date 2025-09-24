@@ -1,9 +1,0 @@
-{
-  "dependencies": {
-    "express": "^5.1.0",
-    "jsonresume-theme-even": "^0.26.0",
-    "jsonresume-theme-flat": "^0.3.7",
-    "puppeteer": "^24.10.2",
-    "resume-cli": "^3.0.8"
-  }
-}
